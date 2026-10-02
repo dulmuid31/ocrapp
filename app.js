@@ -1,4 +1,4 @@
-// Register Service Worker
+// Register Service Worker untuk PWA Offline
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js')
     .then(() => console.log('Service Worker Active'))
@@ -12,61 +12,91 @@ const ocrOutput = document.getElementById('ocrOutput');
 const exportBtn = document.getElementById('exportBtn');
 const useHeaderCheck = document.getElementById('useHeaderCheck');
 
-// Aktifkan tombol download jika ada isi teks di textarea
+// Aktifkan tombol download jika ada teks di textarea
 ocrOutput.addEventListener('input', () => {
   exportBtn.disabled = ocrOutput.value.trim().length === 0;
 });
 
-function splitLineIntoCells(line) {
-  if (line.includes(',')) {
-    return line.split(',').map(cell => cell.trim());
-  } else if (line.includes(':')) {
-    return line.split(':').map(cell => cell.trim());
-  } else if (/\s{2,}/.test(line)) {
-    return line.split(/\s{2,}/).map(cell => cell.trim());
-  } else {
-    return line.split(/\s+/).map(cell => cell.trim());
-  }
+// 1. Fungsi Pembersihan Karakter Sampah/Noise dari Hasil OCR
+function cleanOCRText(text) {
+  return text
+    .split('\n')
+    // Hapus baris yang hanya berisi 1-2 karakter simbol/sampah
+    .filter(line => line.trim().length > 2 || /\d/.test(line))
+    .map(line => {
+      return line
+        // Bersihkan simbol-simbol tidak beraturan yang sering muncul dari OCR
+        .replace(/[|~`_=\\]/g, ' ')
+        // Rapikan spasi berlebih
+        .replace(/\s+/g, ' ')
+        .trim();
+    })
+    .join('\n');
 }
 
-function parseOCRToExcelData(rawText, useHeader) {
-  const lines = rawText.split('\n').filter(line => line.trim() !== '');
+// 2. Fungsi Pemisah Kolom Pintar & Rapi
+function splitLineToColumns(line) {
+  // Jika baris berisi karakter koma (CSV)
+  if (line.includes(',')) {
+    return line.split(',').map(c => c.trim()).filter(c => c !== '');
+  }
+  // Jika baris berisi titik dua (Formulir)
+  if (line.includes(':')) {
+    return line.split(':').map(c => c.trim()).filter(c => c !== '');
+  }
+  // Pisahkan berdasarkan tab atau 2/lebih spasi berurutan (Tabel)
+  const parts = line.split(/\s{2,}|\t/).map(c => c.trim()).filter(c => c !== '');
+  
+  if (parts.length > 1) {
+    return parts;
+  }
+  
+  // Jika tidak terpisah, coba pisahkan berdasarkan pola Angka / NIK / Nama jika ada
+  return line.split(/\s+/).filter(c => c.length > 0);
+}
+
+// 3. Konversi Teks ke Objek Excel
+function parseTextToExcelData(rawText, useHeader) {
+  const cleanText = cleanOCRText(rawText);
+  const lines = cleanText.split('\n').filter(l => l.trim() !== '');
+
   if (lines.length === 0) return [];
 
   if (useHeader && lines.length > 1) {
-    const headers = splitLineIntoCells(lines[0]);
+    const headers = splitLineToColumns(lines[0]);
     const dataRows = lines.slice(1);
 
-    return dataRows.map((line) => {
-      const cells = splitLineIntoCells(line);
+    return dataRows.map(line => {
+      const cells = splitLineToColumns(line);
       const rowObj = {};
 
-      headers.forEach((headerName, index) => {
-        const key = headerName || `Kolom ${index + 1}`;
-        rowObj[key] = cells[index] !== undefined ? cells[index] : '';
+      headers.forEach((header, index) => {
+        const colKey = header || `Kolom ${index + 1}`;
+        rowObj[colKey] = cells[index] !== undefined ? cells[index] : '';
       });
 
+      // Jika jumlah sel melebihi header
       if (cells.length > headers.length) {
         for (let i = headers.length; i < cells.length; i++) {
-          rowObj[`Kolom ${i + 1}`] = cells[i];
+          rowObj[`Kolom Extra ${i + 1}`] = cells[i];
         }
       }
 
       return rowObj;
     });
   } else {
-    return lines.map((line) => {
-      const cells = splitLineIntoCells(line);
+    return lines.map(line => {
+      const cells = splitLineToColumns(line);
       const rowObj = {};
-      cells.forEach((cell, colIndex) => {
-        rowObj[`Kolom ${colIndex + 1}`] = cell;
+      cells.forEach((cell, idx) => {
+        rowObj[`Kolom ${idx + 1}`] = cell;
       });
       return rowObj;
     });
   }
 }
 
-// Fungsi Utama OCR dengan Progres Tracker & Fallback CDN
+// 4. Proses OCR dengan Konfigurasi Khusus Blok Tabel (PSM 6)
 async function processImage(file) {
   if (!file) return;
 
@@ -76,84 +106,86 @@ async function processImage(file) {
   ocrOutput.value = '';
 
   try {
-    // Inisialisasi Tesseract dengan event logger untuk memantau progres
     const worker = await Tesseract.createWorker('eng', 1, {
       logger: m => {
-        console.log(m);
-        if (m.status === 'loading tesseract core') {
-          statusDiv.innerText = 'Memuat engine Tesseract...';
-        } else if (m.status === 'initializing tesseract') {
-          statusDiv.innerText = 'Inisialisasi bahasa (ENG)...';
-        } else if (m.status === 'recognizing text') {
+        if (m.status === 'recognizing text') {
           const progress = Math.round((m.progress || 0) * 100);
-          statusDiv.innerText = `Membaca teks gambar: ${progress}%`;
+          statusDiv.innerText = `Menganalisis dan merapikan tabel: ${progress}%`;
         }
       }
     });
 
-    statusDiv.innerText = 'Memproses analisis OCR...';
+    // SETTING KHUSUS: PSM 6 memaksa OCR membaca gambar sebagai blok teks/tabel bersatu
+    await worker.setParameters({
+      tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK,
+    });
+
+    statusDiv.innerText = 'Memproses pembacaan gambar...';
     const ret = await worker.recognize(file);
     await worker.terminate();
 
-    const resultText = ret.data ? ret.data.text : '';
+    const rawResult = ret.data ? ret.data.text : '';
+    const cleanedResult = cleanOCRText(rawResult);
 
-    if (!resultText || resultText.trim() === '') {
+    if (!cleanedResult || cleanedResult.trim() === '') {
       statusDiv.className = 'error-msg';
-      statusDiv.innerText = 'Gambar terbaca tetapi tidak ditemukan teks. Coba gunakan foto yang lebih terang/jelas.';
+      statusDiv.innerText = 'Teks tidak terdeteksi dengan jelas. Pastikan foto terang, fokus, dan tegak.';
     } else {
-      ocrOutput.value = resultText;
-      statusDiv.innerText = 'Scan selesai! Teks berhasil diekstrak.';
+      ocrOutput.value = cleanedResult;
+      statusDiv.innerText = 'Scan berhasil! Data telah dirapikan. Anda dapat mengedit teks sebelum mengunduh.';
       exportBtn.disabled = false;
     }
   } catch (err) {
     console.error("OCR Error:", err);
     statusDiv.className = 'error-msg';
-    statusDiv.innerText = 'Gagal memproses OCR: ' + (err.message || 'Pastikan terhubung ke internet saat pertama kali menggunakan.');
+    statusDiv.innerText = 'Gagal memproses gambar: ' + (err.message || 'Terjadi kesalahan OCR');
   }
 }
 
+// Event Listeners Input Foto
 cameraInput.addEventListener('change', (e) => processImage(e.target.files[0]));
 galleryInput.addEventListener('change', (e) => processImage(e.target.files[0]));
 
-// Ekspor Excel via Blob URL
+// 5. Ekspor Excel (.xlsx) dengan Format Kolom Rapi
 exportBtn.addEventListener('click', () => {
   const currentText = ocrOutput.value;
   if (!currentText.trim()) {
-    alert("Tidak ada teks untuk diekspor!");
+    alert("Tidak ada data untuk diekspor!");
     return;
   }
 
   try {
     const useHeader = useHeaderCheck.checked;
-    const excelData = parseOCRToExcelData(currentText, useHeader);
+    const excelData = parseTextToExcelData(currentText, useHeader);
 
     if (excelData.length === 0) {
-      alert("Teks tidak dapat dikonversi ke format tabel.");
+      alert("Format teks tidak dapat dikonversi.");
       return;
     }
 
     const worksheet = XLSX.utils.json_to_sheet(excelData);
 
-    // Auto-fit lebar kolom
+    // Mengatur lebar kolom otomatis
     const allKeys = Object.keys(excelData[0] || {});
     worksheet['!cols'] = allKeys.map(key => {
       const maxLen = Math.max(
         key.length,
         ...excelData.map(r => (r[key] ? r[key].toString().length : 0))
       );
-      return { wch: maxLen + 4 };
+      return { wch: Math.min(Math.max(maxLen + 3, 12), 40) }; // Batas lebar minimal 12, maksimal 40
     });
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Hasil Scan");
 
+    // Unduh File
     const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([wbout], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Hasil_Scan_${Date.now()}.xlsx`;
+    a.download = `Hasil_Scan_Rapi_${Date.now()}.xlsx`;
     document.body.appendChild(a);
     a.click();
     
@@ -164,6 +196,6 @@ exportBtn.addEventListener('click', () => {
 
   } catch (err) {
     console.error("Export Error:", err);
-    alert("Gagal mengunduh file Excel: " + err.message);
+    alert("Gagal mengunduh Excel: " + err.message);
   }
 });
