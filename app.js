@@ -1,225 +1,169 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OCR Scan to Excel (Offline PWA)</title>
-  
-  <!-- Konfigurasi PWA -->
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#10b981">
-  <meta name="description" content="Aplikasi PWA Offline untuk Scan Foto/Gambar ke File Excel (.xlsx)">
+// Register Service Worker
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js')
+    .then(() => console.log('Service Worker Active'))
+    .catch(err => console.error('SW Error:', err));
+}
 
-  <!-- Library CDN (Untuk Offline total, simpan file JS ini secara lokal di folder proyek) -->
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+const cameraInput = document.getElementById('cameraInput');
+const galleryInput = document.getElementById('galleryInput');
+const statusDiv = document.getElementById('status');
+const ocrOutput = document.getElementById('ocrOutput');
+const exportBtn = document.getElementById('exportBtn');
+const useHeaderCheck = document.getElementById('useHeaderCheck');
 
-  <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
+// Aktifkan tombol download jika ada isi teks di textarea
+ocrOutput.addEventListener('input', () => {
+  exportBtn.disabled = ocrOutput.value.trim().length === 0;
+});
+
+function splitLineIntoCells(line) {
+  if (line.includes(',')) {
+    return line.split(',').map(cell => cell.trim());
+  } else if (line.includes(':')) {
+    return line.split(':').map(cell => cell.trim());
+  } else if (/\s{2,}/.test(line)) {
+    return line.split(/\s{2,}/).map(cell => cell.trim());
+  } else {
+    return line.split(/\s+/).map(cell => cell.trim());
+  }
+}
+
+function parseOCRToExcelData(rawText, useHeader) {
+  const lines = rawText.split('\n').filter(line => line.trim() !== '');
+  if (lines.length === 0) return [];
+
+  if (useHeader && lines.length > 1) {
+    const headers = splitLineIntoCells(lines[0]);
+    const dataRows = lines.slice(1);
+
+    return dataRows.map((line) => {
+      const cells = splitLineIntoCells(line);
+      const rowObj = {};
+
+      headers.forEach((headerName, index) => {
+        const key = headerName || `Kolom ${index + 1}`;
+        rowObj[key] = cells[index] !== undefined ? cells[index] : '';
+      });
+
+      if (cells.length > headers.length) {
+        for (let i = headers.length; i < cells.length; i++) {
+          rowObj[`Kolom ${i + 1}`] = cells[i];
+        }
+      }
+
+      return rowObj;
+    });
+  } else {
+    return lines.map((line) => {
+      const cells = splitLineIntoCells(line);
+      const rowObj = {};
+      cells.forEach((cell, colIndex) => {
+        rowObj[`Kolom ${colIndex + 1}`] = cell;
+      });
+      return rowObj;
+    });
+  }
+}
+
+// Fungsi Utama OCR dengan Progres Tracker & Fallback CDN
+async function processImage(file) {
+  if (!file) return;
+
+  statusDiv.className = '';
+  statusDiv.innerText = 'Menyiapkan modul OCR...';
+  exportBtn.disabled = true;
+  ocrOutput.value = '';
+
+  try {
+    // Inisialisasi Tesseract dengan event logger untuk memantau progres
+    const worker = await Tesseract.createWorker('eng', 1, {
+      logger: m => {
+        console.log(m);
+        if (m.status === 'loading tesseract core') {
+          statusDiv.innerText = 'Memuat engine Tesseract...';
+        } else if (m.status === 'initializing tesseract') {
+          statusDiv.innerText = 'Inisialisasi bahasa (ENG)...';
+        } else if (m.status === 'recognizing text') {
+          const progress = Math.round((m.progress || 0) * 100);
+          statusDiv.innerText = `Membaca teks gambar: ${progress}%`;
+        }
+      }
+    });
+
+    statusDiv.innerText = 'Memproses analisis OCR...';
+    const ret = await worker.recognize(file);
+    await worker.terminate();
+
+    const resultText = ret.data ? ret.data.text : '';
+
+    if (!resultText || resultText.trim() === '') {
+      statusDiv.className = 'error-msg';
+      statusDiv.innerText = 'Gambar terbaca tetapi tidak ditemukan teks. Coba gunakan foto yang lebih terang/jelas.';
+    } else {
+      ocrOutput.value = resultText;
+      statusDiv.innerText = 'Scan selesai! Teks berhasil diekstrak.';
+      exportBtn.disabled = false;
+    }
+  } catch (err) {
+    console.error("OCR Error:", err);
+    statusDiv.className = 'error-msg';
+    statusDiv.innerText = 'Gagal memproses OCR: ' + (err.message || 'Pastikan terhubung ke internet saat pertama kali menggunakan.');
+  }
+}
+
+cameraInput.addEventListener('change', (e) => processImage(e.target.files[0]));
+galleryInput.addEventListener('change', (e) => processImage(e.target.files[0]));
+
+// Ekspor Excel via Blob URL
+exportBtn.addEventListener('click', () => {
+  const currentText = ocrOutput.value;
+  if (!currentText.trim()) {
+    alert("Tidak ada teks untuk diekspor!");
+    return;
+  }
+
+  try {
+    const useHeader = useHeaderCheck.checked;
+    const excelData = parseOCRToExcelData(currentText, useHeader);
+
+    if (excelData.length === 0) {
+      alert("Teks tidak dapat dikonversi ke format tabel.");
+      return;
     }
 
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      padding: 20px;
-      max-width: 640px;
-      margin: 0 auto;
-      background-color: #f3f4f6;
-      color: #1f2937;
-      line-height: 1.5;
-    }
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
 
-    .card {
-      background: #ffffff;
-      padding: 24px;
-      border-radius: 16px;
-      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    }
+    // Auto-fit lebar kolom
+    const allKeys = Object.keys(excelData[0] || {});
+    worksheet['!cols'] = allKeys.map(key => {
+      const maxLen = Math.max(
+        key.length,
+        ...excelData.map(r => (r[key] ? r[key].toString().length : 0))
+      );
+      return { wch: maxLen + 4 };
+    });
 
-    h2 {
-      color: #059669;
-      font-size: 1.5rem;
-      font-weight: 700;
-      margin-bottom: 16px;
-      text-align: center;
-    }
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Hasil Scan");
 
-    .btn-group {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-
-    .btn-action {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background-color: #2563eb;
-      color: #ffffff;
-      padding: 12px 16px;
-      border-radius: 10px;
-      font-weight: 600;
-      font-size: 0.95rem;
-      cursor: pointer;
-      flex: 1;
-      text-align: center;
-      user-select: none;
-      transition: background-color 0.2s, transform 0.1s;
-    }
-
-    .btn-action:active {
-      transform: scale(0.98);
-    }
-
-    .btn-gallery {
-      background-color: #7c3aed;
-    }
-
-    .btn-action:hover {
-      opacity: 0.92;
-    }
-
-    input[type="file"] {
-      display: none;
-    }
-
-    #status {
-      padding: 10px 14px;
-      border-radius: 8px;
-      background-color: #eff6ff;
-      color: #1d4ed8;
-      font-size: 0.9rem;
-      font-weight: 500;
-      margin-bottom: 16px;
-      word-break: break-word;
-      border: 1px solid #bfdbfe;
-    }
-
-    #status.error-msg {
-      background-color: #fef2f2;
-      color: #dc2626;
-      border-color: #fecaca;
-    }
-
-    .options-group {
-      margin-bottom: 16px;
-      background: #f9fafb;
-      padding: 12px 16px;
-      border-radius: 10px;
-      border: 1px solid #e5e7eb;
-    }
-
-    .checkbox-label {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      cursor: pointer;
-      font-size: 0.95rem;
-      font-weight: 500;
-      color: #374151;
-    }
-
-    .checkbox-label input[type="checkbox"] {
-      width: 18px;
-      height: 18px;
-      accent-color: #10b981;
-      cursor: pointer;
-    }
-
-    .review-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .review-header h3 {
-      font-size: 1rem;
-      color: #374151;
-    }
-
-    textarea {
-      width: 100%;
-      height: 180px;
-      border: 1px solid #d1d5db;
-      border-radius: 8px;
-      padding: 12px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.875rem;
-      line-height: 1.4;
-      resize: vertical;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-
-    textarea:focus {
-      border-color: #10b981;
-      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
-    }
-
-    button#exportBtn {
-      background-color: #10b981;
-      color: #ffffff;
-      border: none;
-      padding: 14px 20px;
-      border-radius: 10px;
-      font-weight: 700;
-      font-size: 1rem;
-      cursor: pointer;
-      width: 100%;
-      margin-top: 16px;
-      transition: background-color 0.2s, opacity 0.2s;
-    }
-
-    button#exportBtn:hover:not(:disabled) {
-      background-color: #059669;
-    }
-
-    button:disabled {
-      background-color: #9ca3af;
-      cursor: not-allowed;
-      opacity: 0.7;
-    }
-  </style>
-</head>
-<body>
-
-  <div class="card">
-    <h2>Scan Foto ke Excel</h2>
+    const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
     
-    <!-- Tombol Input Media -->
-    <div class="btn-group">
-      <label for="cameraInput" class="btn-action">📷 Kamera</label>
-      <input type="file" id="cameraInput" accept="image/*" capture="environment">
-
-      <label for="galleryInput" class="btn-action btn-gallery">🖼️ Galeri</label>
-      <input type="file" id="galleryInput" accept="image/*">
-    </div>
-
-    <!-- Status Pemrosesan -->
-    <div id="status">Siap memproses gambar...</div>
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Hasil_Scan_${Date.now()}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
     
-    <!-- Opsi Pemrosesan Excel -->
-    <div class="options-group">
-      <label class="checkbox-label">
-        <input type="checkbox" id="useHeaderCheck" checked>
-        <span>Gunakan baris pertama sebagai Header / Nama Kolom</span>
-      </label>
-    </div>
+    setTimeout(() => {
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    }, 100);
 
-    <!-- Review & Edit Data -->
-    <div class="review-header">
-      <h3>Review Data Hasil Scan:</h3>
-    </div>
-    <textarea id="ocrOutput" placeholder="Data hasil scan akan muncul di sini... Anda juga dapat mengetik atau mengedit teks secara manual di sini."></textarea>
-    
-    <!-- Tombol Unduh Excel -->
-    <button id="exportBtn" disabled>Download File Excel (.xlsx)</button>
-  </div>
-
-  <!-- Skrip Utama Aplikasi -->
-  <script src="app.js"></script>
-</body>
-</html>
+  } catch (err) {
+    console.error("Export Error:", err);
+    alert("Gagal mengunduh file Excel: " + err.message);
+  }
+});
