@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scanner Medis Gratis</title>
+    <!-- Konfigurasi PWA -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#3498db">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    
+    <!-- Memuat Mesin AI Tesseract dari CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 650px; margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); text-align: center; }
+        h2 { color: #2c3e50; margin-bottom: 5px; }
+        p { color: #7f8c8d; margin-bottom: 25px; font-size: 14px; }
+        
+        .btn-group { display: flex; gap: 10px; justify-content: center; margin-bottom: 15px; flex-wrap: wrap;}
+        .btn { padding: 12px 20px; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; border: none; transition: 0.3s; flex: 1; min-width: 140px; color: white;}
+        .btn:active { transform: scale(0.98); }
+        .btn input { display: none; }
+        .btn-kamera { background-color: #3498db; box-shadow: 0 4px 6px rgba(52, 152, 219, 0.3); }
+        .btn-galeri { background-color: #9b59b6; box-shadow: 0 4px 6px rgba(155, 89, 182, 0.3); }
+
+        #statusArea { display: none; margin: 20px 0; padding: 15px; background: #fff3cd; border-radius: 8px; color: #856404; font-weight: bold; font-size: 14px; text-align: left;}
+        progress { width: 100%; height: 20px; border-radius: 10px; margin-top: 10px; }
+
+        #resultArea { display: none; margin-top: 25px; text-align: left; }
+        .table-container { overflow-x: auto; border-radius: 8px; border: 1px solid #ddd; max-height: 400px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 10px 12px; border-bottom: 1px solid #ddd; }
+        th { background-color: #2c3e50; color: white; position: sticky; top: 0; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        
+        .btn-download { display: block; width: 100%; box-sizing: border-box; text-align: center; background-color: #27ae60; color: white; padding: 15px; margin-top: 15px; border-radius: 8px; font-weight: bold; text-decoration: none; cursor: pointer; border: none; font-size: 16px;}
+        
+        #previewImg { max-width: 100%; max-height: 200px; border-radius: 8px; margin-bottom: 15px; display: none; object-fit: contain; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Scanner PWA (100% Gratis)</h2>
+    <p>AI Tesseract berjalan langsung di perangkat Anda (Client-Side).</p>
+
+    <img id="previewImg" src="" alt="Preview Gambar">
+
+    <div class="btn-group">
+        <label class="btn btn-kamera">
+            📸 Buka Kamera
+            <input type="file" accept="image/*" capture="environment" id="kameraInput">
+        </label>
+        
+        <label class="btn btn-galeri">
+            🖼️ Dari Galeri
+            <input type="file" accept="image/*" id="galeriInput">
+        </label>
+    </div>
+
+    <div id="statusArea">
+        <div id="statusText">Mempersiapkan AI Engine...</div>
+        <progress id="progressBar" value="0" max="1"></progress>
+    </div>
+
+    <div id="resultArea">
+        <h3 style="text-align: center; color: #27ae60;">✅ Selesai Dibaca!</h3>
+        <p style="text-align: center; font-size: 12px; color: #666; margin-top:-15px;">Anda dapat mengedit teks langsung di dalam tabel sebelum mengunduh.</p>
+        <div class="table-container">
+            <table id="tabelHasil">
+                <thead>
+                    <tr>
+                        <th>Tanggal</th>
+                        <th>Nama & No RM</th>
+                        <th>Tindakan</th>
+                    </tr>
+                </thead>
+                <tbody id="badanTabel">
+                    <!-- Data akan masuk kesini -->
+                </tbody>
+            </table>
+        </div>
+        <button class="btn-download" onclick="downloadCSV()">⬇️ Unduh sebagai Excel (CSV)</button>
+    </div>
+</div>
+
+<script>
+    // Daftarkan Service Worker untuk fitur PWA Offline
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').then(function(reg) {
+            console.log('Service Worker terdaftar!', reg);
+        }).catch(function(err) {
+            console.log('Service Worker gagal terdaftar.', err);
+        });
+    }
+
+    const statusArea = document.getElementById('statusArea');
+    const statusText = document.getElementById('statusText');
+    const progressBar = document.getElementById('progressBar');
+    const resultArea = document.getElementById('resultArea');
+    const previewImg = document.getElementById('previewImg');
+    const badanTabel = document.getElementById('badanTabel');
+
+    // Fungsi pemilah teks berbasis pola (Regex) khusus untuk dokumen Anda
+    function ekstrakBaris(teks) {
+        // Membersihkan karakter aneh
+        teks = teks.replace(/[~|]/g, '').trim();
+        if(teks.length < 5) return null; // Abaikan baris kosong
+
+        let tanggal = "";
+        let tindakan = "";
+        let nama = teks;
+
+        // Cari pola tanggal di awal (misal: "04 september 2026")
+        // \d{1,2} = 1 atau 2 digit angka, \s+ = spasi, [a-zA-Z]+ = nama bulan, \d{4} = tahun
+        const matchTanggal = teks.match(/^(\d{1,2}\s+[a-zA-Z]+\s+\d{4})/i);
+        if(matchTanggal) {
+            tanggal = matchTanggal[0];
+            nama = nama.replace(tanggal, "").trim();
+        }
+
+        // Cari pola tindakan di akhir (Rawat jalan / Rawat inap)
+        const matchTindakan = nama.match(/(rawat\s+jalan|rawat\s+inap)/i);
+        if(matchTindakan) {
+            tindakan = matchTindakan[0];
+            nama = nama.replace(matchTindakan[0], "").trim();
+        }
+
+        // Jika berhasil mendeteksi setidaknya salah satu ciri-ciri data pasien, masukkan ke tabel
+        if(tanggal || tindakan || nama.includes("(")) {
+            return [tanggal, nama, tindakan];
+        }
+        return null;
+    }
+
+    async function prosesGambar(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Tampilkan Preview
+        const objectUrl = URL.createObjectURL(file);
+        previewImg.src = objectUrl;
+        previewImg.style.display = 'block';
+
+        // Tampilan UI
+        resultArea.style.display = 'none';
+        statusArea.style.display = 'block';
+        badanTabel.innerHTML = '';
+        e.target.value = ""; // Reset input
+
+        try {
+            statusText.innerText = "Menginisialisasi AI OCR...";
+            progressBar.value = 0;
+
+            // Memulai proses Tesseract AI
+            const worker = await Tesseract.createWorker({
+                logger: m => {
+                    if (m.status === 'recognizing text') {
+                        statusText.innerText = `Sedang Membaca Teks... ${Math.round(m.progress * 100)}%`;
+                        progressBar.value = m.progress;
+                    } else {
+                        statusText.innerText = `Menyiapkan mesin: ${m.status}`;
+                    }
+                }
+            });
+            
+            // Muat bahasa Indonesia
+            await worker.loadLanguage('ind');
+            await worker.initialize('ind');
+            
+            const { data: { text } } = await worker.recognize(file);
+            await worker.terminate();
+
+            // Memproses hasil teks mentah menjadi tabel baris demi baris
+            const barisTeks = text.split('\n');
+            let adaData = false;
+
+            barisTeks.forEach(baris => {
+                const dataDiekstrak = ekstrakBaris(baris);
+                if(dataDiekstrak) {
+                    adaData = true;
+                    const tr = document.createElement('tr');
+                    
+                    dataDiekstrak.forEach(selTeks => {
+                        const td = document.createElement('td');
+                        td.textContent = selTeks;
+                        td.contentEditable = "true"; // Agar bisa diedit manual jika AI salah ketik
+                        tr.appendChild(td);
+                    });
+                    badanTabel.appendChild(tr);
+                }
+            });
+
+            statusArea.style.display = 'none';
+            
+            if(adaData) {
+                resultArea.style.display = 'block';
+            } else {
+                alert("Gagal menemukan format data pasien pada gambar ini. Pastikan gambar jelas dan tidak blur.");
+            }
+
+        } catch (error) {
+            console.error(error);
+            statusArea.style.display = 'none';
+            alert("Terjadi kesalahan saat memproses gambar.");
+        }
+    }
+
+    document.getElementById('kameraInput').addEventListener('change', prosesGambar);
+    document.getElementById('galeriInput').addEventListener('change', prosesGambar);
+
+    // Fungsi untuk mengubah tabel HTML menjadi file CSV
+    function downloadCSV() {
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "Tanggal,Nama & No RM,Tindakan\n"; // Header
+        
+        const barisTabel = document.querySelectorAll("#tabelHasil tbody tr");
+        barisTabel.forEach(tr => {
+            const kolom = tr.querySelectorAll("td");
+            let dataBaris = [];
+            kolom.forEach(td => {
+                // Menghilangkan koma di dalam teks agar tidak merusak format CSV
+                let teks = td.innerText.replace(/,/g, " "); 
+                dataBaris.push(`"${teks}"`);
+            });
+            csvContent += dataBaris.join(",") + "\n";
+        });
+
+        // Buat file dan otomatis diunduh
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", "Data_Pasien_Hasil_Scan.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+</script>
+
+</body>
+</html>
